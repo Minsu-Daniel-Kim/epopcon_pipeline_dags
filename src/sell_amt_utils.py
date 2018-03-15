@@ -372,7 +372,7 @@ def apply_model(partition, batch):
         i += 1
 
         if i % 50 == 0:
-            logger.info(str(i / float(batch_len)) + "% done")
+            logger.info(str(i * 100/ float(batch_len)) + "% done")
 
     if len(df_lst) > 0:
         result = pd.concat(df_lst)

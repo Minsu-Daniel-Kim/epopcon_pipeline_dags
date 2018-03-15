@@ -46,7 +46,7 @@ def retrieve_dataset_from_presto(**param):
 
     if DEVELOPMENT:
         result = presto.get_pandas_df(
-            hql="SELECT ID, ITEM_ID, STOCK_ID, STOCK_AMOUNT, COLLECT_DAY, REG_ID, REG_DT FROM inventory_part WHERE item_part = %s AND month_part >= 3 LIMIT 300" % partition)
+            hql="SELECT ID, ITEM_ID, STOCK_ID, STOCK_AMOUNT, COLLECT_DAY, REG_ID, REG_DT FROM inventory_part WHERE item_part = %s AND month_part >= 3 LIMIT 500" % partition)
     else:
         result = presto.get_pandas_df(hql="SELECT ID, ITEM_ID, STOCK_ID, STOCK_AMOUNT, COLLECT_DAY, REG_ID, REG_DT FROM inventory_part WHERE item_part = %s AND month_part >= 3" % partition)
 
@@ -90,7 +90,11 @@ presto = PrestoHook()
 # mysql = MySqlHook('mysql_wspider_temp_local')
 # hiveServer = HiveServer2Hook()
 
-DEVELOPMENT = True
+DEVELOPMENT = False
+EMAIL_LIST = [
+                'daniel.kim@epopcon.com'
+                # 'zururux@epopcon.com'
+]
 
 dag = DAG('sell_amt_modeling_dag_production',
           default_args=default_args,
@@ -109,39 +113,42 @@ truncate_sell_amt_table_task = PythonOperator(
 
 retrieving_email_task = EmailOperator(
                 task_id='retrieving_email_task',
-                to=['daniel.kim@epopcon.com', 'zururux@epopcon.com'],
+                to=EMAIL_LIST,
                 subject='Retrieving part is successfully done! [1/3]',
                 html_content='Retrieving part => Modeling part', dag=dag)
 
 modeling_email_task = EmailOperator(
                 task_id='modeling_email_task',
-                to=['daniel.kim@epopcon.com', 'zururux@epopcon.com'],
+                to=EMAIL_LIST,
                 subject='Modeling part is successfully done! [2/3]',
                 html_content='Modeling part => Transfering part', dag=dag)
 
 final_email_task = EmailOperator(
                 task_id='final_email_task',
-                to=['daniel.kim@epopcon.com', 'zururux@epopcon.com'],
+                to=EMAIL_LIST,
                 subject='Epopcon ETL for sell_amt_modeling is successfully done! [3/3]',
                 html_content='Epopcon ETL for sell_amt_modeling is successfully done! [3/3]', dag=dag)
 
 modeling_email_task >> truncate_sell_amt_table_task
 
-for item_part in [821, 822, 824, 850]:
+for idx, item_part in enumerate(range(700, 720)):
 
     retrieve_dataset_from_presto_task = PythonOperator(task_id='retrieve_dataset_from_presto_task_%s' % item_part,
                                 op_kwargs={'item_part': item_part},
                                 python_callable=retrieve_dataset_from_presto,
+                                priority_weight=idx,
                                 dag=dag)
 
     apply_model_task = PythonOperator(task_id='apply_model_task_%s' % item_part,
                                 op_kwargs={'item_part': item_part},
                                 python_callable=apply_model_op,
+                                priority_weight=idx + 10,
                                 dag=dag)
 
     transfer_to_mysql_temp_task = PythonOperator(task_id='transfer_to_mysql_temp_task_%s' % item_part,
                                 op_kwargs={'item_part': item_part, 'engine': wspider_temp_engine},
                                 python_callable=transfer_to_mysql_op,
+                                priority_weight=idx + 20,
                                 dag=dag)
 
     begin_task >> retrieve_dataset_from_presto_task >> retrieving_email_task \
