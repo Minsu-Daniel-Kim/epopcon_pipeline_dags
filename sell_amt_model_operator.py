@@ -6,6 +6,7 @@ from airflow.operators.email_operator import EmailOperator
 from airflow.hooks.presto_hook import PrestoHook
 from airflow.operators.bash_operator import BashOperator
 from sqlalchemy.sql import text as sa_text
+from collections import deque
 
 from airflow.hooks.hive_hooks import HiveCliHook
 from airflow.hooks.hive_hooks import HiveServer2Hook
@@ -71,9 +72,6 @@ def transfer_to_mysql_op(**param):
     partition = param['item_part']
     engine = param['engine']
     dataset = read_feather(partition, processed=True)
-
-    # logger.info(dataset.head())
-
     wspider_temp_engine.dispose()
     dataset.to_sql(name='MWS_COLT_ITEM_SELL_AMT_DEV', con=engine, if_exists='append', index=False, chunksize=10000)
 
@@ -87,70 +85,120 @@ def transfer_to_mysql_op(**param):
 #     insert_sell_amt(result)
 
 presto = PrestoHook()
-# mysql = MySqlHook('mysql_wspider_temp_local')
-# hiveServer = HiveServer2Hook()
-
 DEVELOPMENT = False
 EMAIL_LIST = [
-                'daniel.kim@epopcon.com'
-                # 'zururux@epopcon.com'
+                'daniel.kim@epopcon.com',
+                'zururux@epopcon.com'
 ]
 
-dag = DAG('sell_amt_modeling_dag_production',
+dag = DAG('sell_amt_modeling_dag_production_weekly',
           default_args=default_args,
           dagrun_timeout=timedelta(10),
           description='Modeling the sell amount',
-          schedule_interval='0 9 * * *',
+          schedule_interval='0 0 * * 0',
           # schedule_interval="@once",
           catchup=False)
 
-begin_task = DummyOperator(task_id='begin_task', dag=dag)
+# begin_task = DummyOperator(task_id='begin_task', dag=dag)
 
 truncate_sell_amt_table_task = PythonOperator(
                             task_id='truncate_sell_amt_table_task',
                             python_callable=truncate_sell_amt_table_op,
                             dag=dag)
 
-retrieving_email_task = EmailOperator(
-                task_id='retrieving_email_task',
+# retrieving_email_task = EmailOperator(
+#                 task_id='retrieving_email_task',
+#                 to=EMAIL_LIST,
+#                 subject='Retrieving part is successfully done! [1/3]',
+#                 html_content='Retrieving part => Modeling part', dag=dag)
+
+# modeling_email_task = EmailOperator(
+#                 task_id='modeling_email_task',
+#                 to=EMAIL_LIST,
+#                 subject='Modeling part is successfully done! [1/2]',
+#                 html_content='Modeling part => Transfering part', dag=dag)
+#
+welcome_email_task = EmailOperator(
+                task_id='welcome_email_task',
                 to=EMAIL_LIST,
-                subject='Retrieving part is successfully done! [1/3]',
-                html_content='Retrieving part => Modeling part', dag=dag)
+                subject='Welcome Email',
+                html_content='Welcome Email', dag=dag)
+#
+#
 
-modeling_email_task = EmailOperator(
-                task_id='modeling_email_task',
-                to=EMAIL_LIST,
-                subject='Modeling part is successfully done! [2/3]',
-                html_content='Modeling part => Transfering part', dag=dag)
+# modeling_email_task >> truncate_sell_amt_table_task
 
-final_email_task = EmailOperator(
-                task_id='final_email_task',
-                to=EMAIL_LIST,
-                subject='Epopcon ETL for sell_amt_modeling is successfully done! [3/3]',
-                html_content='Epopcon ETL for sell_amt_modeling is successfully done! [3/3]', dag=dag)
+# for idx, item_part in enumerate(range(10)):
+#
+#     retrieve_dataset_from_presto_task = PythonOperator(task_id='retrieve_dataset_from_presto_task_%s' % item_part,
+#                                 op_kwargs={'item_part': item_part},
+#                                 python_callable=retrieve_dataset_from_presto,
+#                                 priority_weight=1,
+#                                 dag=dag)
+#
+#     apply_model_task = PythonOperator(task_id='apply_model_task_%s' % item_part,
+#                                 op_kwargs={'item_part': item_part},
+#                                 python_callable=apply_model_op,
+#                                 priority_weight=2,
+#                                 dag=dag)
+#
+#     transfer_to_mysql_temp_task = PythonOperator(task_id='transfer_to_mysql_temp_task_%s' % item_part,
+#                                 op_kwargs={'item_part': item_part, 'engine': wspider_temp_engine},
+#                                 python_callable=transfer_to_mysql_op,
+#                                 dag=dag)
+#
+#     begin_task >> retrieve_dataset_from_presto_task >> apply_model_task >> modeling_email_task
+#     truncate_sell_amt_table_task >> transfer_to_mysql_temp_task >> final_email_task
 
-modeling_email_task >> truncate_sell_amt_table_task
+start = 0
 
-for idx, item_part in enumerate(range(700, 720)):
+genesis_task = DummyOperator(task_id='Genesis', dag=dag)
 
-    retrieve_dataset_from_presto_task = PythonOperator(task_id='retrieve_dataset_from_presto_task_%s' % item_part,
-                                op_kwargs={'item_part': item_part},
-                                python_callable=retrieve_dataset_from_presto,
-                                priority_weight=idx,
-                                dag=dag)
+welcome_email_task >> genesis_task >> truncate_sell_amt_table_task
 
-    apply_model_task = PythonOperator(task_id='apply_model_task_%s' % item_part,
-                                op_kwargs={'item_part': item_part},
-                                python_callable=apply_model_op,
-                                priority_weight=idx + 10,
-                                dag=dag)
+TOTAL_PARTITION = 400
+N_CHUNCKS = 100
 
-    transfer_to_mysql_temp_task = PythonOperator(task_id='transfer_to_mysql_temp_task_%s' % item_part,
-                                op_kwargs={'item_part': item_part, 'engine': wspider_temp_engine},
-                                python_callable=transfer_to_mysql_op,
-                                priority_weight=idx + 20,
-                                dag=dag)
+for end in range(0, TOTAL_PARTITION+1, N_CHUNCKS)[1:]:
 
-    begin_task >> retrieve_dataset_from_presto_task >> retrieving_email_task \
-    >> apply_model_task >> modeling_email_task
-    truncate_sell_amt_table_task >> transfer_to_mysql_temp_task >> final_email_task
+    begin_task = DummyOperator(task_id='begin_part_%s_task' % end, dag=dag)
+    success_email_task = EmailOperator(
+        task_id='success_email_part_%s_task' % end,
+        to=EMAIL_LIST,
+        subject='Part %s is successfully done!' % end,
+        html_content='Part %s is successfully done!' % end,
+        dag=dag)
+
+
+
+
+    modeling_email_task = EmailOperator(
+        task_id='modeling_email_part_%s_task' % end,
+        to=EMAIL_LIST,
+        subject='Modeling part %s is successfully done!' % end,
+        html_content='Modeling part %s is successfully done!' % end, dag=dag)
+
+    for idx, item_part in enumerate(range(start, end)):
+
+
+        retrieve_dataset_from_presto_task = PythonOperator(task_id='retrieve_dataset_from_presto_part_%s_task_%s' % (end, item_part),
+                                    op_kwargs={'item_part': item_part},
+                                    python_callable=retrieve_dataset_from_presto,
+                                    priority_weight=1,
+                                    dag=dag)
+
+        apply_model_task = PythonOperator(task_id='apply_model_part_%s_task_%s' % (end, item_part),
+                                    op_kwargs={'item_part': item_part},
+                                    python_callable=apply_model_op,
+                                    priority_weight=2,
+                                    dag=dag)
+
+        transfer_to_mysql_temp_task = PythonOperator(task_id='transfer_to_mysql_temp_part_%s_task_%s' % (end, item_part),
+                                    op_kwargs={'item_part': item_part, 'engine': wspider_temp_engine},
+                                    python_callable=transfer_to_mysql_op,
+                                    dag=dag)
+
+        begin_task >> retrieve_dataset_from_presto_task >> apply_model_task >> modeling_email_task >> transfer_to_mysql_temp_task >> success_email_task
+    truncate_sell_amt_table_task >> begin_task
+
+    start = end

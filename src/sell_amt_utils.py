@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from airflow.hooks import MySqlHook
 import time
 import math
+import shutil
 
 from pytz import timezone
 import logging
@@ -288,9 +289,41 @@ def insert_extracted_feature(wspider_temp_engine, extracted_feature_df):
     wspider_temp_engine.execute(query, [tuple(x) for x in extracted_feature_df.values])
 
 
-def insert_sell_amt(sell_amt_df):
+def insert_sell_amt(engine, batch_sell_amt, production=False):
+    batch_sell_amt['UPT_DT'] = batch_sell_amt['UPT_DT'].astype(str)
+    batch_sell_amt['REG_DT'] = batch_sell_amt['REG_DT'].astype(str)
+    batch_sell_amt['COLLECT_DAY'] = batch_sell_amt['COLLECT_DAY'].astype(str)
+    batch_sell_amt = batch_sell_amt.where((pd.notnull(batch_sell_amt)), None)
+    col_names = batch_sell_amt.columns.values
+    col_names = str(tuple([str(elem) for elem in col_names]))
+
+    if production:
+        query = "INSERT INTO wspider.MWS_COLT_ITEM_SELL_AMT_DEV" + col_names + " VALUES %s ON DUPLICATE KEY UPDATE SELL_AMOUNT=%s, REVISE_STOCK_AMOUNT=%s, STOCK_AMOUNT=%s"
+    else:
+        query = "INSERT INTO wspider_temp.MWS_COLT_ITEM_SELL_AMT" + col_names + " VALUES %s ON DUPLICATE KEY UPDATE SELL_AMOUNT=%s, REVISE_STOCK_AMOUNT=%s, STOCK_AMOUNT=%s"
+    query = query.replace("'", "")
+    print(query)
+
+    # values = [tuple(row) for row in batch_sell_amt.values[1:]]
+    values = [(tuple(row), row[3], row[8], row[9]) for row in batch_sell_amt.values]
+    print('---------')
+    print(values[:3])
+    # print(values[0])
+    # [(values, values[3], values[8], values[9]), (values, values[3], values[8], values[9])]
+
+    engine.execute(query, values)
+
+
+def insert_sell_amt_old(sell_amt_df):
     wspider_engine.dispose()
     wspider_temp_engine.dispose()
+
+    col_names = sell_amt_df.columns.values
+    col_names = [str(elem) for elem in col_names]
+    sell_amt_df.columns = col_names
+
+    print(sell_amt_df.head(3))
+
     sell_amt_df = sell_amt_df.where((pd.notnull(sell_amt_df)), None)
     query = """REPLACE INTO MWS_COLT_ITEM_SELL_AMT_DEV %s VALUES %s """ % (
     tuple(sell_amt_df.columns), tuple(['%s' for _ in range(len(sell_amt_df.columns))]))
@@ -387,27 +420,53 @@ def apply_model(partition, batch):
         write_to_feather(partition, result, processed=True)
         # insert_sell_amt(wspider_engine, wspider_temp_engine, result)
 
-def write_to_feather(partition, data, processed=True):
+def write_to_feather(partition, data, processed=True, meta=False):
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
+    if meta:
+        filename = "item_ids.feather"
+        complete_filename = os.path.join(path, "tmp_feathers/meta", filename)
+        data.to_feather(complete_filename)
+        return True
 
     if processed:
+
         filename = "processed_%s.feather" % str(partition)
-        complete_filename = os.path.join("../tmp_feathers/processed", filename)
+        complete_filename = os.path.join(path, "tmp_feathers/processed", filename)
     else:
         filename = "raw_%s.feather" % str(partition)
-        complete_filename = os.path.join("../tmp_feathers/raw", filename)
+        complete_filename = os.path.join(path, "tmp_feathers/raw", filename)
+
     data.to_feather(complete_filename)
 
+def remove_meta_file():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    complete_filename = os.path.join(path, "tmp_feathers/meta", "item_ids.feather")
 
-def read_feather(partition, processed=True):
 
+    if os.path.isfile(complete_filename):
+        try:
+            if os.path.isfile(complete_filename):
+                os.unlink(complete_filename)
+            # elif os.path.isdir(file_path): shutil.rmtree(file_path)
+        except Exception as e:
+            print(e)
+
+def read_feather(partition, processed=True, meta=False):
+
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    if meta:
+        filename = "item_ids.feather"
+        complete_filename = os.path.join(path, "tmp_feathers/meta", filename)
+        return pd.read_feather(complete_filename)
 
 
     if processed:
         filename = "processed_%s.feather" % str(partition)
-        complete_filename = os.path.join("../tmp_feathers/processed", filename)
+        complete_filename = os.path.join(path, "tmp_feathers/processed", filename)
     else:
         filename = "raw_%s.feather" % str(partition)
-        complete_filename = os.path.join("../tmp_feathers/raw", filename)
+        complete_filename = os.path.join(path, "tmp_feathers/raw", filename)
     return pd.read_feather(complete_filename)
 
 
